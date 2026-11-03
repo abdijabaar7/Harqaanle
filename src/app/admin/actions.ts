@@ -59,13 +59,161 @@ export async function inviteTailorStaff(formData: FormData) {
   redirect(`/team?business=${businessId}&invited=1`);
 }
 
-export async function acceptInvitations() {
+export async function createTailorStaffDirect(formData: FormData) {
+  const businessId = String(formData.get("business_id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const password = String(formData.get("password") ?? "").trim();
+
+  if (!businessId || name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 6) {
+    redirect(`/team?business=${businessId}&error=validation`);
+  }
+
   const supabase = await createClient();
   const { data: claimsData } = await supabase.auth.getClaims();
   const claims = claimsData?.claims;
   if (!claims?.sub) redirect("/login");
+
+  const { data: membership } = await supabase
+    .from("business_members")
+    .select("role")
+    .eq("business_id", businessId)
+    .eq("user_id", claims.sub)
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (membership?.role !== "business_admin") redirect("/dashboard?error=denied");
+
+  let admin: SupabaseClient;
+  try {
+    admin = createAdminClient();
+  } catch {
+    redirect(`/team?business=${businessId}&error=server-config`);
+  }
+
+  const { data: existingUsers } = await admin.auth.admin.listUsers();
+  const existingUser = existingUsers?.users?.find((u) => u.email === email);
+
+  let userId: string;
+  if (existingUser) {
+    userId = existingUser.id;
+    await admin.auth.admin.updateUserById(userId, {
+      password,
+      email_confirm: true,
+      user_metadata: { display_name: name },
+    });
+  } else {
+    const { data: newUser, error: createError } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { display_name: name },
+    });
+    if (createError || !newUser?.user) {
+      redirect(`/team?business=${businessId}&error=create-staff`);
+    }
+    userId = newUser.user.id;
+  }
+
+  await admin.from("profiles").upsert({
+    user_id: userId,
+    display_name: name,
+    platform_role: "user",
+  });
+
+  await admin.from("business_members").upsert({
+    business_id: businessId,
+    user_id: userId,
+    role: "tailor_staff",
+    status: "active",
+    updated_at: new Date().toISOString(),
+  });
+
+  await admin.from("business_access_audit").insert({
+    business_id: businessId,
+    actor_user_id: claims.sub,
+    target_user_id: userId,
+    target_email: email,
+    action: "staff_created_direct",
+  });
+
+  redirect(`/team?business=${businessId}&created-staff=1`);
+}
+
+export async function resetStaffPassword(formData: FormData) {
+  const businessId = String(formData.get("business_id") ?? "");
+  const staffId = String(formData.get("staff_id") ?? "");
+  const newPassword = String(formData.get("new_password") ?? "").trim();
+
+  if (!businessId || !staffId || newPassword.length < 6) {
+    redirect(`/team?business=${businessId}&error=password-validation`);
+  }
+
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims;
+  if (!claims?.sub) redirect("/login");
+
+  const { data: membership } = await supabase
+    .from("business_members")
+    .select("role")
+    .eq("business_id", businessId)
+    .eq("user_id", claims.sub)
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (membership?.role !== "business_admin") redirect("/dashboard?error=denied");
+
+  let admin: SupabaseClient;
+  try {
+    admin = createAdminClient();
+  } catch {
+    redirect(`/team?business=${businessId}&error=server-config`);
+  }
+
+  await admin.auth.admin.updateUserById(staffId, {
+    password: newPassword,
+    email_confirm: true,
+  });
+
+  await admin
+    .from("business_members")
+    .update({
+      status: "active",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("business_id", businessId)
+    .eq("user_id", staffId);
+
+  redirect(`/team?business=${businessId}&password-reset=1`);
+}
+
+export async function acceptInvitations(formData?: FormData) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims;
+  if (!claims?.sub) redirect("/login");
+
+  if (formData) {
+    const password = String(formData.get("password") ?? "").trim();
+    const displayName = String(formData.get("display_name") ?? "").trim();
+
+    if (password && password.length >= 6) {
+      await supabase.auth.updateUser({ password });
+    }
+    if (displayName) {
+      await supabase.from("profiles").update({ display_name: displayName }).eq("user_id", claims.sub);
+    }
+  }
+
   const { error } = await supabase.rpc("accept_pending_business_memberships");
-  if (error) redirect("/auth/accept-invite?error=accept");
+  if (error) {
+    const { data: mem } = await supabase.from("business_members").select("status").eq("user_id", claims.sub).maybeSingle();
+    if (mem?.status === "active") {
+      redirect("/dashboard?notice=invitation-accepted");
+    }
+    redirect("/auth/accept-invite?error=accept");
+  }
   redirect("/dashboard?notice=invitation-accepted");
 }
 
