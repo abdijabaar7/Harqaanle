@@ -34,12 +34,34 @@ export default async function NewOrderPage({
     );
   }
 
-  const { data: customers } = await supabase
-    .from("customers")
-    .select("id, name, phone")
-    .eq("business_id", membership.business_id)
-    .is("archived_at", null)
-    .order("name");
+  const [{ data: customers }, { data: staffMemberships }] = await Promise.all([
+    supabase
+      .from("customers")
+      .select("id, name, phone")
+      .eq("business_id", membership.business_id)
+      .is("archived_at", null)
+      .order("name"),
+    supabase
+      .from("business_members")
+      .select("user_id, role")
+      .eq("business_id", membership.business_id)
+      .eq("status", "active"),
+  ]);
+
+  const staffUserIds = staffMemberships?.map((s: { user_id: string }) => s.user_id) ?? [];
+  const { data: staffProfiles } = staffUserIds.length
+    ? await supabase.from("profiles").select("user_id, display_name").in("user_id", staffUserIds)
+    : { data: [] };
+
+  const staffProfileMap = new Map(
+    (staffProfiles ?? []).map((p: { user_id: string; display_name: string | null }) => [p.user_id, p.display_name])
+  );
+
+  const staffList = (staffMemberships ?? []).map((m: { user_id: string; role: string }) => ({
+    id: m.user_id,
+    name: staffProfileMap.get(m.user_id) ?? (m.role === "business_admin" ? "Admin" : "Toliye"),
+    role: m.role,
+  }));
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
@@ -49,7 +71,7 @@ export default async function NewOrderPage({
       <div className="mt-4 mb-6">
         <h1 className="text-2xl font-bold text-[#122E40]">Dalab cusub</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Diiwaangeli macmiilka, xaqiiji cabbirrada dharka, iyo lacagta.
+          Diiwaangeli macmiilka, cabbirrada, sawirka marada/naqshadda, iyo toliyaha.
         </p>
       </div>
 
@@ -70,6 +92,7 @@ export default async function NewOrderPage({
       <OrderCreateForm
         businessId={membership.business_id}
         customers={customers ?? []}
+        staffMembers={staffList}
         initialCustomerId={query.customer}
         action={createOrder}
       />

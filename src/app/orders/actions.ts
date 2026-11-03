@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 const fieldsByGarment: Record<string, string[]> = {
   shirt: ["S", "M", "L", "B", "K"],
@@ -37,6 +38,9 @@ export async function createOrder(formData: FormData) {
   const quantity = Number(formData.get("quantity"));
   const price = Number(formData.get("unit_price"));
   const paid = Number(formData.get("initial_payment") ?? 0);
+  const staffId = String(formData.get("staff_id") ?? "").trim();
+  const fabricFile = formData.get("fabric_file");
+  const designFile = formData.get("design_file");
 
   if (!businessId || (!customerId && (!customerName || !customerPhone))) {
     redirect(`/orders/new?business=${businessId}&error=customer-validation`);
@@ -120,6 +124,95 @@ export async function createOrder(formData: FormData) {
     console.error("Order create error details:", error);
     redirect(`/orders/new?business=${businessId}&error=save`);
   }
+
+  // 1. Assign staff if selected
+  if (staffId) {
+    try {
+      await supabase.rpc("assign_order_staff", {
+        target_business: businessId,
+        target_order: orderId,
+        target_staff: staffId,
+      });
+    } catch (e) {
+      console.error("Failed to assign staff upon order creation:", e);
+    }
+  }
+
+  // 2. Upload Fabric and Design images if provided
+  let adminClient: ReturnType<typeof createAdminClient> | null = null;
+  try {
+    adminClient = createAdminClient();
+  } catch (e) {
+    console.error("Admin client init error for order files:", e);
+  }
+  const storageClient = adminClient ?? supabase;
+
+  if (fabricFile instanceof File && fabricFile.size > 0) {
+    try {
+      const fileId = crypto.randomUUID();
+      const filePath = `${businessId}/${orderId}/${fileId}`;
+      const buffer = Buffer.from(await fabricFile.arrayBuffer());
+
+      const { error: uploadError } = await storageClient.storage
+        .from("order-files")
+        .upload(filePath, buffer, {
+          contentType: fabricFile.type || "image/jpeg",
+          upsert: false,
+        });
+
+      if (!uploadError) {
+        await storageClient.from("order_files").insert({
+          id: fileId,
+          business_id: businessId,
+          order_id: orderId,
+          object_path: filePath,
+          kind: "fabric",
+          mime_type: fabricFile.type || "image/jpeg",
+          size_bytes: fabricFile.size,
+          upload_state: "uploaded",
+          uploaded_by: claims.sub,
+        });
+      } else {
+        console.error("Fabric upload error:", uploadError);
+      }
+    } catch (e) {
+      console.error("Error processing fabric file:", e);
+    }
+  }
+
+  if (designFile instanceof File && designFile.size > 0) {
+    try {
+      const fileId = crypto.randomUUID();
+      const filePath = `${businessId}/${orderId}/${fileId}`;
+      const buffer = Buffer.from(await designFile.arrayBuffer());
+
+      const { error: uploadError } = await storageClient.storage
+        .from("order-files")
+        .upload(filePath, buffer, {
+          contentType: designFile.type || "image/jpeg",
+          upsert: false,
+        });
+
+      if (!uploadError) {
+        await storageClient.from("order_files").insert({
+          id: fileId,
+          business_id: businessId,
+          order_id: orderId,
+          object_path: filePath,
+          kind: "design",
+          mime_type: designFile.type || "image/jpeg",
+          size_bytes: designFile.size,
+          upload_state: "uploaded",
+          uploaded_by: claims.sub,
+        });
+      } else {
+        console.error("Design upload error:", uploadError);
+      }
+    } catch (e) {
+      console.error("Error processing design file:", e);
+    }
+  }
+
   redirect(`/orders/${orderId}?business=${businessId}&created=1`);
 }
 
@@ -154,8 +247,8 @@ export async function recordPayment(formData: FormData) {
     target_business: businessId,
     target_order: orderId,
     payment_amount: amount,
-    payment_method: String(formData.get("method") ?? "") || null,
-    payment_reference: String(formData.get("reference") ?? "") || null,
+    payment_method: "cash",
+    payment_reference: null,
   });
   if (error) redirect(`/orders/${orderId}?business=${businessId}&error=payment`);
   redirect(`/orders/${orderId}?business=${businessId}&paid=1`);
